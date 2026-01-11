@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { cn } from './utils'
 
 type ImageDetails = {
   name: string
@@ -13,6 +14,14 @@ type ClipboardDebug = {
   fileSummary: string
 }
 
+type TouchDebug = {
+  count: number
+  lastEvent: string
+  lastPosition: string
+  active: boolean
+  entries: string[]
+}
+
 const DEFAULT_BRUSH_SIZE = 52
 const DEFAULT_BLUR_STRENGTH = 6
 
@@ -22,6 +31,9 @@ function App() {
   const blurredCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
   const isDrawingRef = useRef(false)
+  const activeInputRef = useRef<'pointer' | 'touch' | null>(null)
+  const touchEventCountRef = useRef(0)
+  const touchDebugUpdateRef = useRef(0)
 
   const [imageDetails, setImageDetails] = useState<ImageDetails | null>(null)
   const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
@@ -30,6 +42,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState<string>('')
   const [clipboardDebug, setClipboardDebug] =
     useState<ClipboardDebug | null>(null)
+  const [touchDebug, setTouchDebug] = useState<TouchDebug | null>(null)
 
   const setupCanvases = useCallback((image: HTMLImageElement) => {
     const canvas = canvasRef.current
@@ -225,7 +238,7 @@ function App() {
     updateBlurredCanvas(blurStrength)
   }, [blurStrength, updateBlurredCanvas])
 
-  const getCanvasPoint = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const getCanvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current
     if (!canvas) return null
 
@@ -234,9 +247,58 @@ function App() {
     const scaleY = canvas.height / rect.height
 
     return {
-      x: (event.clientX - rect.left) * scaleX,
-      y: (event.clientY - rect.top) * scaleY,
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
     }
+  }
+
+  const getTouchPoint = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    const touch = event.touches[0] ?? event.changedTouches[0]
+    if (!touch) return null
+    return getCanvasPoint(touch.clientX, touch.clientY)
+  }
+
+  const recordTouchEvent = (
+    eventName: 'start' | 'move' | 'end' | 'cancel',
+    event: React.TouchEvent<HTMLCanvasElement>
+  ) => {
+    touchEventCountRef.current += 1
+
+    const now =
+      typeof performance === 'undefined' ? Date.now() : performance.now()
+    if (eventName === 'move' && now - touchDebugUpdateRef.current < 120) {
+      return
+    }
+
+    touchDebugUpdateRef.current = now
+
+    const touch = event.touches[0] ?? event.changedTouches[0]
+    const point = touch ? getCanvasPoint(touch.clientX, touch.clientY) : null
+    const position = point
+      ? `${Math.round(point.x)}, ${Math.round(point.y)}`
+      : 'n/a'
+    const touchCount = event.touches.length || event.changedTouches.length
+    const timestamp = new Date().toLocaleTimeString()
+    const entry = `${timestamp} • ${eventName} • ${position} • touches:${touchCount}`
+
+    setTouchDebug((previous) => {
+      const wasActive = previous?.active ?? false
+      const active =
+        eventName === 'start'
+          ? true
+          : eventName === 'end' || eventName === 'cancel'
+            ? false
+            : wasActive
+      const entries = [entry, ...(previous?.entries ?? [])].slice(0, 6)
+
+      return {
+        count: touchEventCountRef.current,
+        lastEvent: eventName,
+        lastPosition: position,
+        active,
+        entries,
+      }
+    })
   }
 
   const applyBlurAtPoint = useCallback(
@@ -278,35 +340,86 @@ function App() {
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!blurredCanvasRef.current) return
-    event.preventDefault()
-    event.currentTarget.setPointerCapture(event.pointerId)
+    if (activeInputRef.current && activeInputRef.current !== 'pointer') return
+    activeInputRef.current = 'pointer'
+    if (event.cancelable) event.preventDefault()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
     isDrawingRef.current = true
 
-    const point = getCanvasPoint(event)
+    const point = getCanvasPoint(event.clientX, event.clientY)
     if (point) {
       applyBlurAtPoint(point)
     }
   }
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawingRef.current) return
-    event.preventDefault()
+    if (!isDrawingRef.current || activeInputRef.current !== 'pointer') return
+    if (event.cancelable) event.preventDefault()
 
-    const point = getCanvasPoint(event)
+    const point = getCanvasPoint(event.clientX, event.clientY)
     if (point) {
       applyBlurAtPoint(point)
     }
   }
 
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawingRef.current) return
-    event.preventDefault()
+    if (activeInputRef.current !== 'pointer') return
+    if (event.cancelable) event.preventDefault()
     isDrawingRef.current = false
-    event.currentTarget.releasePointerCapture(event.pointerId)
+    activeInputRef.current = null
+    event.currentTarget.releasePointerCapture?.(event.pointerId)
   }
 
   const handlePointerLeave = () => {
+    if (activeInputRef.current !== 'pointer') return
     isDrawingRef.current = false
+    activeInputRef.current = null
+  }
+
+  const handlePointerCancel = () => {
+    if (activeInputRef.current !== 'pointer') return
+    isDrawingRef.current = false
+    activeInputRef.current = null
+  }
+
+  const handleTouchStart = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    if (!blurredCanvasRef.current) return
+    recordTouchEvent('start', event)
+    if (activeInputRef.current && activeInputRef.current !== 'touch') return
+    activeInputRef.current = 'touch'
+    if (event.cancelable) event.preventDefault()
+    isDrawingRef.current = true
+
+    const point = getTouchPoint(event)
+    if (point) {
+      applyBlurAtPoint(point)
+    }
+  }
+
+  const handleTouchMove = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    recordTouchEvent('move', event)
+    if (!isDrawingRef.current || activeInputRef.current !== 'touch') return
+    if (event.cancelable) event.preventDefault()
+
+    const point = getTouchPoint(event)
+    if (point) {
+      applyBlurAtPoint(point)
+    }
+  }
+
+  const handleTouchEnd = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    recordTouchEvent('end', event)
+    if (activeInputRef.current !== 'touch') return
+    if (event.cancelable) event.preventDefault()
+    isDrawingRef.current = false
+    activeInputRef.current = null
+  }
+
+  const handleTouchCancel = (event: React.TouchEvent<HTMLCanvasElement>) => {
+    recordTouchEvent('cancel', event)
+    if (activeInputRef.current !== 'touch') return
+    isDrawingRef.current = false
+    activeInputRef.current = null
   }
 
   const handleReset = () => {
@@ -320,6 +433,67 @@ function App() {
     context.clearRect(0, 0, canvas.width, canvas.height)
     context.drawImage(sourceCanvas, 0, 0)
     setStatusMessage('Reset to the original image.')
+  }
+
+  const handlePasteFromClipboard = async () => {
+    if (!navigator.clipboard || !('read' in navigator.clipboard)) {
+      setStatusMessage('Clipboard read is not supported in this browser.')
+      setClipboardDebug({
+        clipboardTypes: [],
+        itemTypes: [],
+        fileTypes: [],
+        fileSummary: 'unsupported',
+      })
+      return
+    }
+
+    setStatusMessage('Reading clipboard...')
+
+    try {
+      const clipboardItems = await navigator.clipboard.read()
+      const itemTypes = clipboardItems.flatMap((item) => item.types)
+      const clipboardTypes = Array.from(new Set(itemTypes))
+      let blob: Blob | null = null
+      let blobType = ''
+
+      for (const item of clipboardItems) {
+        const imageType = item.types.find((type) => type.startsWith('image/'))
+        if (!imageType) continue
+        blobType = imageType
+        blob = await item.getType(imageType)
+        break
+      }
+
+      const fileTypes = blob ? [blob.type || blobType || 'unknown'] : []
+      const fileSummary = blob
+        ? `clipboard-image • ${blob.type || blobType || 'unknown'} • ${blob.size} bytes`
+        : 'none'
+
+      setClipboardDebug({
+        clipboardTypes,
+        itemTypes,
+        fileTypes,
+        fileSummary,
+      })
+
+      console.info('[paste] clipboard read types', clipboardTypes)
+      console.info('[paste] clipboard read item types', itemTypes)
+
+      if (!blob) {
+        console.info('[paste] clipboard read no image')
+        setStatusMessage('Clipboard did not include an image.')
+        return
+      }
+
+      console.info('[paste] clipboard read image', {
+        type: blob.type || blobType,
+        size: blob.size,
+      })
+      loadImageFromBlob(blob, 'Clipboard image')
+    } catch (error) {
+      console.warn('[paste] clipboard read failed', error)
+      setStatusMessage('Clipboard read failed. Check permissions.')
+    }
   }
 
   const handleCopyToClipboard = async () => {
@@ -347,34 +521,48 @@ function App() {
       await navigator.clipboard.write([clipboardItem])
       setStatusMessage('Blurred image copied to clipboard.')
     } catch (error) {
+      console.warn('[clipboard] copy failed', error)
       setStatusMessage('Clipboard copy failed. Try again.')
     }
   }
 
   const hasImage = Boolean(imageDetails)
+  const isMobile =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(pointer: coarse)')?.matches ||
+      (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0))
   const buttonBaseClass =
-    'inline-flex items-center justify-center gap-2 rounded-full border border-transparent px-[1.4rem] py-[0.65rem] text-[0.95rem] font-semibold transition duration-200 ease-out active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none max-[600px]:w-full'
-  const primaryButtonClass = `${buttonBaseClass} bg-blue-600 text-white shadow-[0_10px_20px_rgba(37,99,235,0.25)] hover:bg-blue-700`
-  const secondaryButtonClass = `${buttonBaseClass} bg-white text-slate-800 border-slate-200 hover:border-slate-400`
-  const ghostButtonClass = `${buttonBaseClass} bg-transparent text-slate-600 border-dashed border-slate-200 hover:border-slate-300`
+    'inline-flex w-full items-center justify-center gap-2 rounded-full border border-transparent px-6 py-2.5 text-base font-semibold active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none sm:w-auto'
+  const primaryButtonClass = cn(
+    buttonBaseClass,
+    'bg-blue-600 text-white shadow-md hover:bg-blue-700'
+  )
+  const secondaryButtonClass = cn(
+    buttonBaseClass,
+    'bg-white text-slate-800 border-slate-200 hover:border-slate-400'
+  )
+  const ghostButtonClass = cn(
+    buttonBaseClass,
+    'bg-transparent text-slate-600 border-dashed border-slate-200 hover:border-slate-300'
+  )
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900 antialiased">
-      <div className="mx-auto flex max-w-[1200px] flex-col gap-10 p-10 font-sans">
+    <div className="min-h-dvh bg-slate-100 text-slate-900 antialiased">
+      <div className="mx-auto flex max-w-6xl flex-col gap-10 p-6 font-sans sm:p-10">
         <header className="flex flex-col gap-6">
           <div>
-            <p className="m-0 mb-2 text-xs font-bold uppercase tracking-[0.32em] text-slate-500">
+            <p className="m-0 mb-2 text-pretty text-xs font-semibold uppercase text-slate-500">
               Subliminal Blur Studio
             </p>
-            <h1 className="m-0 text-[clamp(2rem,3.5vw,3rem)] font-semibold text-slate-900">
+            <h1 className="m-0 text-balance text-3xl font-semibold text-slate-900 sm:text-4xl lg:text-5xl">
               Paste or upload, then paint subtle blur.
             </h1>
-            <p className="m-0 mt-2.5 max-w-[640px] text-base text-slate-600">
+            <p className="m-0 mt-2.5 max-w-2xl text-pretty text-base text-slate-600">
               Paste an image from your clipboard or upload a file. Drag your mouse
-              to blur only the sections you want to hide.
+              or finger to blur only the sections you want to hide.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-3 max-[600px]:flex-col max-[600px]:items-stretch">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
             <label className={primaryButtonClass} htmlFor="image-upload">
               Upload image
             </label>
@@ -385,6 +573,13 @@ function App() {
               accept="image/*"
               onChange={handleFileChange}
             />
+            <button
+              className={cn(secondaryButtonClass, 'sm:hidden')}
+              type="button"
+              onClick={handlePasteFromClipboard}
+            >
+              Paste from clipboard
+            </button>
             <button
               className={secondaryButtonClass}
               type="button"
@@ -404,10 +599,10 @@ function App() {
           </div>
         </header>
 
-        <section className="grid items-start gap-8 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
+        <section className="flex flex-col gap-8 lg:flex-row lg:items-start">
           {hasImage ? (
             <>
-              <div className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_20px_40px_rgba(15,23,42,0.08)]">
+              <div className="flex flex-1 flex-col gap-3 rounded-3xl border border-slate-200 bg-white p-6 shadow-lg">
                 <canvas
                   ref={canvasRef}
                   className="block h-auto w-full rounded-2xl border border-slate-200 bg-slate-50 touch-none"
@@ -415,16 +610,23 @@ function App() {
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onPointerLeave={handlePointerLeave}
+                  onPointerCancel={handlePointerCancel}
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleTouchEnd}
+                  onTouchCancel={handleTouchCancel}
                 />
-                <div className="text-sm text-slate-500">
-                  Drag to apply a gentle blur.
+                <div className="text-pretty text-sm text-slate-500">
+                  Drag or swipe to apply a gentle blur.
                 </div>
               </div>
-              <aside className="flex flex-col gap-6 rounded-[20px] border border-slate-200 bg-white p-6">
+              <aside className="flex w-full flex-col gap-6 rounded-2xl border border-slate-200 bg-white p-6 lg:w-72 lg:shrink-0">
                 <div className="flex flex-col gap-2.5">
                   <div className="flex items-center justify-between font-semibold text-slate-900">
                     <span>Brush size</span>
-                    <span className="font-semibold text-blue-600">{brushSize}px</span>
+                    <span className="font-semibold tabular-nums text-blue-600">
+                      {brushSize}px
+                    </span>
                   </div>
                   <input
                     type="range"
@@ -436,14 +638,14 @@ function App() {
                       setBrushSize(Number(event.target.value))
                     }
                   />
-                  <p className="m-0 text-sm text-slate-500">
+                  <p className="m-0 text-pretty text-sm text-slate-500">
                     Larger brushes cover more area quickly.
                   </p>
                 </div>
                 <div className="flex flex-col gap-2.5">
                   <div className="flex items-center justify-between font-semibold text-slate-900">
                     <span>Blur strength</span>
-                    <span className="font-semibold text-blue-600">
+                    <span className="font-semibold tabular-nums text-blue-600">
                       {blurStrength}px
                     </span>
                   </div>
@@ -457,35 +659,37 @@ function App() {
                       setBlurStrength(Number(event.target.value))
                     }
                   />
-                  <p className="m-0 text-sm text-slate-500">
+                  <p className="m-0 text-pretty text-sm text-slate-500">
                     Keep it low for a subliminal finish.
                   </p>
                 </div>
                 {imageDetails && (
-                  <div className="flex flex-col gap-1 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    <p className="m-0">{imageDetails.name}</p>
-                    <p className="m-0">
+                  <div className="flex flex-col gap-1 rounded-xl bg-slate-50 px-4 py-3 text-pretty text-sm text-slate-600">
+                    <p className="m-0 text-pretty truncate">
+                      {imageDetails.name}
+                    </p>
+                    <p className="m-0 text-pretty tabular-nums">
                       {imageDetails.width} × {imageDetails.height}px
                     </p>
                   </div>
                 )}
-                <div className="flex flex-col gap-1 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                  <p className="m-0">Paste shortcut</p>
-                  <p className="m-0">Ctrl + V / ⌘ + V</p>
+                <div className="flex flex-col gap-1 rounded-xl bg-slate-50 px-4 py-3 text-pretty text-sm text-slate-600">
+                  <p className="m-0 text-pretty">Paste shortcut</p>
+                  <p className="m-0 text-pretty">Ctrl + V / ⌘ + V</p>
                 </div>
               </aside>
             </>
           ) : (
-            <div className="col-span-full rounded-3xl border-2 border-dashed border-slate-200 bg-white p-12 text-center">
+            <div className="w-full rounded-3xl border-2 border-dashed border-slate-200 bg-white p-12 text-center">
               <div className="flex flex-col gap-2">
-                <h2 className="m-0 text-2xl font-semibold text-slate-900">
+                <h2 className="m-0 text-balance text-2xl font-semibold text-slate-900">
                   Paste an image to begin
                 </h2>
-                <p className="m-0 text-base text-slate-600">
+                <p className="m-0 text-pretty text-base text-slate-600">
                   Click anywhere on the page and paste an image from your
                   clipboard, or upload a file to get started.
                 </p>
-                <p className="m-0 text-sm text-slate-500">
+                <p className="m-0 text-pretty text-sm text-slate-500">
                   Your image never leaves the browser.
                 </p>
               </div>
@@ -494,45 +698,76 @@ function App() {
         </section>
 
         {statusMessage && (
-          <div className="w-fit rounded-full bg-slate-200 px-5 py-2.5 font-medium text-slate-900">
+          <div className="w-fit rounded-full bg-slate-200 px-5 py-2.5 text-pretty font-medium text-slate-900">
             {statusMessage}
           </div>
         )}
         {clipboardDebug && (
-          <div className="flex max-w-[680px] flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-slate-600">
-            <p className="m-0 text-sm font-semibold text-slate-900">
+          <div className="flex max-w-2xl flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-pretty text-slate-600">
+            <p className="m-0 text-pretty text-sm font-semibold text-slate-900">
               Clipboard debug
             </p>
-            <div className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-3 text-sm">
-              <span className="font-semibold text-slate-500">Types</span>
-              <span className="break-words font-mono text-slate-700">
+            <div className="flex items-start gap-3 text-sm">
+              <span className="w-20 font-semibold text-slate-500">Types</span>
+              <span className="break-words font-mono tabular-nums text-slate-700">
                 {clipboardDebug.clipboardTypes.length
                   ? clipboardDebug.clipboardTypes.join(', ')
                   : 'none'}
               </span>
             </div>
-            <div className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-3 text-sm">
-              <span className="font-semibold text-slate-500">Items</span>
-              <span className="break-words font-mono text-slate-700">
+            <div className="flex items-start gap-3 text-sm">
+              <span className="w-20 font-semibold text-slate-500">Items</span>
+              <span className="break-words font-mono tabular-nums text-slate-700">
                 {clipboardDebug.itemTypes.length
                   ? clipboardDebug.itemTypes.join(', ')
                   : 'none'}
               </span>
             </div>
-            <div className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-3 text-sm">
-              <span className="font-semibold text-slate-500">Files</span>
-              <span className="break-words font-mono text-slate-700">
+            <div className="flex items-start gap-3 text-sm">
+              <span className="w-20 font-semibold text-slate-500">Files</span>
+              <span className="break-words font-mono tabular-nums text-slate-700">
                 {clipboardDebug.fileTypes.length
                   ? clipboardDebug.fileTypes.join(', ')
                   : 'none'}
               </span>
             </div>
-            <div className="grid grid-cols-[80px_minmax(0,1fr)] items-start gap-3 text-sm">
-              <span className="font-semibold text-slate-500">Image</span>
-              <span className="break-words font-mono text-slate-700">
+            <div className="flex items-start gap-3 text-sm">
+              <span className="w-20 font-semibold text-slate-500">Image</span>
+              <span className="break-words font-mono tabular-nums text-slate-700">
                 {clipboardDebug.fileSummary}
               </span>
             </div>
+          </div>
+        )}
+        {isMobile && touchDebug && (
+          <div className="pointer-events-none fixed bottom-4 right-4 z-50 w-72 rounded-2xl bg-slate-900/90 p-3 text-xs text-slate-100 shadow-lg">
+            <div className="flex items-center justify-between text-[10px] font-semibold uppercase text-slate-300">
+              <span>Touch debug</span>
+              <span>{touchDebug.active ? 'active' : 'idle'}</span>
+            </div>
+            <div className="mt-2 space-y-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-400">Last</span>
+                <span className="font-mono text-[11px] text-slate-100">
+                  {touchDebug.lastEvent} @ {touchDebug.lastPosition}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-400">Count</span>
+                <span className="font-mono text-[11px] text-slate-100">
+                  {touchDebug.count}
+                </span>
+              </div>
+            </div>
+            {touchDebug.entries.length > 0 && (
+              <div className="mt-2 space-y-1 text-[11px] text-slate-300">
+                {touchDebug.entries.map((entry, index) => (
+                  <div key={`${entry}-${index}`} className="font-mono">
+                    {entry}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
