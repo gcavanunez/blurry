@@ -71,6 +71,28 @@ function App() {
     context.filter = 'none'
   }, [])
 
+  const renderImageToCanvas = useCallback(
+    (image: HTMLImageElement) => {
+      const canvas = canvasRef.current
+
+      if (!canvas) {
+        console.warn('[canvas] missing image or canvas', {
+          hasImage: Boolean(image),
+          hasCanvas: Boolean(canvas),
+        })
+        return
+      }
+
+      setupCanvases(image)
+      updateBlurredCanvas(blurStrengthRef.current)
+      console.info('[canvas] rendered', {
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      })
+    },
+    [setupCanvases, updateBlurredCanvas]
+  )
+
   const loadImageFromBlob = useCallback((blob: Blob, name: string) => {
     if (!blob.size) {
       setStatusMessage('Image data was empty or blocked by the browser.')
@@ -97,13 +119,18 @@ function App() {
         width: image.naturalWidth,
         height: image.naturalHeight,
       })
-      setStatusMessage('Image decoded. Preparing canvas...')
+      setStatusMessage('Image ready. Drag to paint subtle blur.')
       console.info('[image] loaded', {
         name,
         type: blob.type,
         size: blob.size,
         width: image.naturalWidth,
         height: image.naturalHeight,
+      })
+
+      requestAnimationFrame(() => {
+        if (imageRef.current !== image) return
+        renderImageToCanvas(image)
       })
     }
 
@@ -114,7 +141,7 @@ function App() {
     }
 
     image.src = objectUrl
-  }, [])
+  }, [renderImageToCanvas])
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -193,28 +220,6 @@ function App() {
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
   }, [handlePaste])
-
-  useEffect(() => {
-    if (!imageDetails) return
-    const image = imageRef.current
-    const canvas = canvasRef.current
-
-    if (!image || !canvas) {
-      console.warn('[canvas] missing image or canvas', {
-        hasImage: Boolean(image),
-        hasCanvas: Boolean(canvas),
-      })
-      return
-    }
-
-    setupCanvases(image)
-    updateBlurredCanvas(blurStrengthRef.current)
-    setStatusMessage('Image ready. Drag to paint subtle blur.')
-    console.info('[canvas] rendered', {
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-    })
-  }, [imageDetails, setupCanvases, updateBlurredCanvas])
 
   useEffect(() => {
     blurStrengthRef.current = blurStrength
