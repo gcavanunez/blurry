@@ -607,6 +607,54 @@ function App() {
     setStatusMessage('Reset to the original image.')
   }
 
+  const getExportFileName = () => {
+    const baseName = imageDetails?.name?.trim() ?? ''
+    const cleanedName = baseName.replace(/\.[^/.]+$/, '')
+    return `${cleanedName || 'blurred-image'}.png`
+  }
+
+  const tryShareImage = async (blob: Blob) => {
+    if (typeof navigator === 'undefined' || !('share' in navigator)) return false
+    if (typeof File === 'undefined') return false
+
+    const file = new File([blob], getExportFileName(), {
+      type: blob.type || 'image/png',
+    })
+
+    if ('canShare' in navigator && !navigator.canShare({ files: [file] })) {
+      return false
+    }
+
+    try {
+      await navigator.share({
+        files: [file],
+        title: 'Blurred image',
+      })
+      setStatusMessage('Share sheet opened for the image.')
+      return true
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setStatusMessage('Share dismissed.')
+        return true
+      }
+      console.warn('[clipboard] share failed', error)
+      return false
+    }
+  }
+
+  const downloadImage = (blob: Blob) => {
+    if (typeof document === 'undefined') return
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+
+    link.href = url
+    link.download = getExportFileName()
+    link.rel = 'noopener'
+    link.click()
+
+    setTimeout(() => URL.revokeObjectURL(url), 300)
+  }
+
   const handlePasteFromClipboard = async () => {
     if (!navigator.clipboard || !('read' in navigator.clipboard)) {
       setStatusMessage('Clipboard read is not supported in this browser.')
@@ -683,19 +731,28 @@ function App() {
       return
     }
 
-    if (!navigator.clipboard || !('ClipboardItem' in window)) {
-      setStatusMessage('Clipboard image copy is not supported here.')
-      return
+    const canWriteClipboardImage =
+      typeof navigator !== 'undefined' &&
+      navigator.clipboard &&
+      'write' in navigator.clipboard &&
+      'ClipboardItem' in window
+
+    if (canWriteClipboardImage) {
+      try {
+        const clipboardItem = new ClipboardItem({ [blob.type]: blob })
+        await navigator.clipboard.write([clipboardItem])
+        setStatusMessage('Blurred image copied to clipboard.')
+        return
+      } catch (error) {
+        console.warn('[clipboard] copy failed', error)
+      }
     }
 
-    try {
-      const clipboardItem = new ClipboardItem({ [blob.type]: blob })
-      await navigator.clipboard.write([clipboardItem])
-      setStatusMessage('Blurred image copied to clipboard.')
-    } catch (error) {
-      console.warn('[clipboard] copy failed', error)
-      setStatusMessage('Clipboard copy failed. Try again.')
-    }
+    const shared = await tryShareImage(blob)
+    if (shared) return
+
+    downloadImage(blob)
+    setStatusMessage('Downloaded image because clipboard is unavailable.')
   }
 
   const hasImage = Boolean(imageDetails)
@@ -758,7 +815,13 @@ function App() {
               onClick={handleCopyToClipboard}
               disabled={!hasImage}
             >
-              Copy to clipboard
+              {typeof navigator !== 'undefined' &&
+              navigator.clipboard &&
+              'ClipboardItem' in window
+                ? 'Copy to clipboard'
+                : isMobile
+                  ? 'Share image'
+                  : 'Download image'}
             </button>
             <button
               className={ghostButtonClass}
