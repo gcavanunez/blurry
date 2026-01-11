@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { BlurFilter, Container, Renderer, Sprite, Texture } from 'pixi.js'
 import { cn } from './utils'
 
 type ImageDetails = {
@@ -32,6 +33,14 @@ function App() {
   const imageRef = useRef<HTMLImageElement | null>(null)
   const isDrawingRef = useRef(false)
   const activeInputRef = useRef<'pointer' | 'touch' | null>(null)
+  const blurScratchRef = useRef<HTMLCanvasElement | null>(null)
+  const blurSourceRef = useRef<HTMLCanvasElement | null>(null)
+  const pixiRendererRef = useRef<Renderer | null>(null)
+  const pixiStageRef = useRef<Container | null>(null)
+  const pixiSpriteRef = useRef<Sprite | null>(null)
+  const pixiBlurFilterRef = useRef<BlurFilter | null>(null)
+  const pixiTextureRef = useRef<Texture | null>(null)
+  const pixiImageRef = useRef<HTMLImageElement | null>(null)
   const touchEventCountRef = useRef(0)
   const touchDebugUpdateRef = useRef(0)
 
@@ -67,21 +76,142 @@ function App() {
     blurredCanvas.width = image.naturalWidth
     blurredCanvas.height = image.naturalHeight
     blurredCanvasRef.current = blurredCanvas
+    blurSourceRef.current = blurredCanvas
   }, [])
 
-  const updateBlurredCanvas = useCallback((strength: number) => {
-    const image = imageRef.current
-    const blurredCanvas = blurredCanvasRef.current
-    if (!image || !blurredCanvas) return
+  const setupPixiPipeline = useCallback((image: HTMLImageElement) => {
+    try {
+      pixiRendererRef.current?.destroy(true)
+      pixiTextureRef.current?.destroy(true)
 
-    const context = blurredCanvas.getContext('2d')
-    if (!context) return
+      const renderer = new Renderer({
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+        backgroundAlpha: 0,
+        antialias: true,
+        preserveDrawingBuffer: true,
+      })
+      const stage = new Container()
+      const texture = Texture.from(image)
+      const sprite = new Sprite(texture)
 
-    context.clearRect(0, 0, blurredCanvas.width, blurredCanvas.height)
-    context.filter = `blur(${strength}px)`
-    context.drawImage(image, 0, 0)
-    context.filter = 'none'
+      sprite.width = image.naturalWidth
+      sprite.height = image.naturalHeight
+
+      const blurFilter = new BlurFilter()
+      blurFilter.blur = blurStrengthRef.current
+      sprite.filters = [blurFilter]
+
+      stage.addChild(sprite)
+
+      pixiRendererRef.current = renderer
+      pixiStageRef.current = stage
+      pixiSpriteRef.current = sprite
+      pixiBlurFilterRef.current = blurFilter
+      pixiTextureRef.current = texture
+      pixiImageRef.current = image
+      blurSourceRef.current = renderer.view as HTMLCanvasElement
+
+      return true
+    } catch (error) {
+      console.warn('[pixi] failed to setup blur pipeline', error)
+      pixiRendererRef.current?.destroy(true)
+      pixiRendererRef.current = null
+      pixiStageRef.current = null
+      pixiSpriteRef.current = null
+      pixiBlurFilterRef.current = null
+      pixiTextureRef.current?.destroy(true)
+      pixiTextureRef.current = null
+      pixiImageRef.current = null
+      return false
+    }
   }, [])
+
+  const updateBlurredCanvas = useCallback(
+    (strength: number) => {
+      const image = imageRef.current
+      const blurredCanvas = blurredCanvasRef.current
+      if (!image || !blurredCanvas) return
+
+      const isIOS =
+        typeof navigator !== 'undefined' &&
+        (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
+      const context = blurredCanvas.getContext('2d')
+      const canUseCanvasFilter =
+        context !== null && !isIOS && 'filter' in context
+
+      if (!canUseCanvasFilter) {
+        if (!pixiRendererRef.current || pixiImageRef.current !== image) {
+          setupPixiPipeline(image)
+        }
+
+        const pixiRenderer = pixiRendererRef.current
+        const pixiStage = pixiStageRef.current
+        const pixiSprite = pixiSpriteRef.current
+        const pixiBlurFilter = pixiBlurFilterRef.current
+
+        if (pixiRenderer && pixiStage && pixiSprite && pixiBlurFilter) {
+          pixiRenderer.resize(image.naturalWidth, image.naturalHeight)
+          pixiSprite.width = image.naturalWidth
+          pixiSprite.height = image.naturalHeight
+          pixiBlurFilter.blur = strength
+          pixiRenderer.render(pixiStage)
+          blurSourceRef.current = pixiRenderer.view as HTMLCanvasElement
+          return
+        }
+      }
+
+      if (!context) return
+
+      if (canUseCanvasFilter) {
+        context.clearRect(0, 0, blurredCanvas.width, blurredCanvas.height)
+        context.filter = `blur(${strength}px)`
+        context.drawImage(image, 0, 0)
+        context.filter = 'none'
+        blurSourceRef.current = blurredCanvas
+        return
+      }
+
+      const scale = Math.max(0.12, 1 - strength / 20)
+      const scaledWidth = Math.max(1, Math.round(blurredCanvas.width * scale))
+      const scaledHeight = Math.max(1, Math.round(blurredCanvas.height * scale))
+      const passes = Math.max(1, Math.round(strength / 6))
+      const scratchCanvas = blurScratchRef.current ??
+        document.createElement('canvas')
+
+      blurScratchRef.current = scratchCanvas
+      scratchCanvas.width = scaledWidth
+      scratchCanvas.height = scaledHeight
+
+      const scratchContext = scratchCanvas.getContext('2d')
+      if (!scratchContext) return
+
+      scratchContext.imageSmoothingEnabled = true
+      scratchContext.imageSmoothingQuality = 'high'
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+
+      let source: CanvasImageSource = image
+
+      for (let pass = 0; pass < passes; pass += 1) {
+        scratchContext.clearRect(0, 0, scaledWidth, scaledHeight)
+        scratchContext.drawImage(source, 0, 0, scaledWidth, scaledHeight)
+        context.clearRect(0, 0, blurredCanvas.width, blurredCanvas.height)
+        context.drawImage(
+          scratchCanvas,
+          0,
+          0,
+          blurredCanvas.width,
+          blurredCanvas.height
+        )
+        source = blurredCanvas
+      }
+
+      blurSourceRef.current = blurredCanvas
+    },
+    [setupPixiPipeline]
+  )
 
   const renderImageToCanvas = useCallback(
     (image: HTMLImageElement) => {
@@ -238,74 +368,80 @@ function App() {
     updateBlurredCanvas(blurStrength)
   }, [blurStrength, updateBlurredCanvas])
 
-  const getCanvasPoint = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current
-    if (!canvas) return null
+  const getCanvasPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const canvas = canvasRef.current
+      if (!canvas) return null
 
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-
-    return {
-      x: (clientX - rect.left) * scaleX,
-      y: (clientY - rect.top) * scaleY,
-    }
-  }
-
-  const getTouchPoint = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    const touch = event.touches[0] ?? event.changedTouches[0]
-    if (!touch) return null
-    return getCanvasPoint(touch.clientX, touch.clientY)
-  }
-
-  const recordTouchEvent = (
-    eventName: 'start' | 'move' | 'end' | 'cancel',
-    event: React.TouchEvent<HTMLCanvasElement>
-  ) => {
-    touchEventCountRef.current += 1
-
-    const now =
-      typeof performance === 'undefined' ? Date.now() : performance.now()
-    if (eventName === 'move' && now - touchDebugUpdateRef.current < 120) {
-      return
-    }
-
-    touchDebugUpdateRef.current = now
-
-    const touch = event.touches[0] ?? event.changedTouches[0]
-    const point = touch ? getCanvasPoint(touch.clientX, touch.clientY) : null
-    const position = point
-      ? `${Math.round(point.x)}, ${Math.round(point.y)}`
-      : 'n/a'
-    const touchCount = event.touches.length || event.changedTouches.length
-    const timestamp = new Date().toLocaleTimeString()
-    const entry = `${timestamp} • ${eventName} • ${position} • touches:${touchCount}`
-
-    setTouchDebug((previous) => {
-      const wasActive = previous?.active ?? false
-      const active =
-        eventName === 'start'
-          ? true
-          : eventName === 'end' || eventName === 'cancel'
-            ? false
-            : wasActive
-      const entries = [entry, ...(previous?.entries ?? [])].slice(0, 6)
+      const rect = canvas.getBoundingClientRect()
+      const scaleX = canvas.width / rect.width
+      const scaleY = canvas.height / rect.height
 
       return {
-        count: touchEventCountRef.current,
-        lastEvent: eventName,
-        lastPosition: position,
-        active,
-        entries,
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY,
       }
-    })
-  }
+    },
+    []
+  )
+
+  const getTouchPoint = useCallback(
+    (event: TouchEvent) => {
+      const touch = event.touches[0] ?? event.changedTouches[0]
+      if (!touch) return null
+      return getCanvasPoint(touch.clientX, touch.clientY)
+    },
+    [getCanvasPoint]
+  )
+
+  const recordTouchEvent = useCallback(
+    (eventName: 'start' | 'move' | 'end' | 'cancel', event: TouchEvent) => {
+      touchEventCountRef.current += 1
+
+      const now =
+        typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (eventName === 'move' && now - touchDebugUpdateRef.current < 120) {
+        return
+      }
+
+      touchDebugUpdateRef.current = now
+
+      const touch = event.touches[0] ?? event.changedTouches[0]
+      const point = touch ? getCanvasPoint(touch.clientX, touch.clientY) : null
+      const position = point
+        ? `${Math.round(point.x)}, ${Math.round(point.y)}`
+        : 'n/a'
+      const touchCount = event.touches.length || event.changedTouches.length
+      const timestamp = new Date().toLocaleTimeString()
+      const entry = `${timestamp} • ${eventName} • ${position} • touches:${touchCount}`
+
+      setTouchDebug((previous) => {
+        const wasActive = previous?.active ?? false
+        const active =
+          eventName === 'start'
+            ? true
+            : eventName === 'end' || eventName === 'cancel'
+              ? false
+              : wasActive
+        const entries = [entry, ...(previous?.entries ?? [])].slice(0, 6)
+
+        return {
+          count: touchEventCountRef.current,
+          lastEvent: eventName,
+          lastPosition: position,
+          active,
+          entries,
+        }
+      })
+    },
+    [getCanvasPoint]
+  )
 
   const applyBlurAtPoint = useCallback(
     (point: { x: number; y: number }) => {
       const canvas = canvasRef.current
-      const blurredCanvas = blurredCanvasRef.current
-      if (!canvas || !blurredCanvas) return
+      const blurSource = blurSourceRef.current ?? blurredCanvasRef.current
+      if (!canvas || !blurSource) return
 
       const context = canvas.getContext('2d')
       if (!context) return
@@ -323,7 +459,7 @@ function App() {
       context.arc(point.x, point.y, radius, 0, Math.PI * 2)
       context.clip()
       context.drawImage(
-        blurredCanvas,
+        blurSource,
         startX,
         startY,
         width,
@@ -339,7 +475,7 @@ function App() {
   )
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!blurredCanvasRef.current) return
+    if (!blurSourceRef.current) return
     if (activeInputRef.current && activeInputRef.current !== 'pointer') return
     activeInputRef.current = 'pointer'
     if (event.cancelable) event.preventDefault()
@@ -382,45 +518,81 @@ function App() {
     activeInputRef.current = null
   }
 
-  const handleTouchStart = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    if (!blurredCanvasRef.current) return
-    recordTouchEvent('start', event)
-    if (activeInputRef.current && activeInputRef.current !== 'touch') return
-    activeInputRef.current = 'touch'
-    if (event.cancelable) event.preventDefault()
-    isDrawingRef.current = true
+  const handleTouchStart = useCallback(
+    (event: TouchEvent) => {
+      if (!blurSourceRef.current) return
+      recordTouchEvent('start', event)
+      if (activeInputRef.current && activeInputRef.current !== 'touch') return
+      activeInputRef.current = 'touch'
+      if (event.cancelable) event.preventDefault()
+      isDrawingRef.current = true
 
-    const point = getTouchPoint(event)
-    if (point) {
-      applyBlurAtPoint(point)
+      const point = getTouchPoint(event)
+      if (point) {
+        applyBlurAtPoint(point)
+      }
+    },
+    [applyBlurAtPoint, getTouchPoint, recordTouchEvent]
+  )
+
+  const handleTouchMove = useCallback(
+    (event: TouchEvent) => {
+      recordTouchEvent('move', event)
+      if (!isDrawingRef.current || activeInputRef.current !== 'touch') return
+      if (event.cancelable) event.preventDefault()
+
+      const point = getTouchPoint(event)
+      if (point) {
+        applyBlurAtPoint(point)
+      }
+    },
+    [applyBlurAtPoint, getTouchPoint, recordTouchEvent]
+  )
+
+  const handleTouchEnd = useCallback(
+    (event: TouchEvent) => {
+      recordTouchEvent('end', event)
+      if (activeInputRef.current !== 'touch') return
+      if (event.cancelable) event.preventDefault()
+      isDrawingRef.current = false
+      activeInputRef.current = null
+    },
+    [recordTouchEvent]
+  )
+
+  const handleTouchCancel = useCallback(
+    (event: TouchEvent) => {
+      recordTouchEvent('cancel', event)
+      if (activeInputRef.current !== 'touch') return
+      isDrawingRef.current = false
+      activeInputRef.current = null
+    },
+    [recordTouchEvent]
+  )
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const options: AddEventListenerOptions = { passive: false }
+    canvas.addEventListener('touchstart', handleTouchStart, options)
+    canvas.addEventListener('touchmove', handleTouchMove, options)
+    canvas.addEventListener('touchend', handleTouchEnd, options)
+    canvas.addEventListener('touchcancel', handleTouchCancel, options)
+
+    return () => {
+      canvas.removeEventListener('touchstart', handleTouchStart)
+      canvas.removeEventListener('touchmove', handleTouchMove)
+      canvas.removeEventListener('touchend', handleTouchEnd)
+      canvas.removeEventListener('touchcancel', handleTouchCancel)
     }
-  }
-
-  const handleTouchMove = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    recordTouchEvent('move', event)
-    if (!isDrawingRef.current || activeInputRef.current !== 'touch') return
-    if (event.cancelable) event.preventDefault()
-
-    const point = getTouchPoint(event)
-    if (point) {
-      applyBlurAtPoint(point)
-    }
-  }
-
-  const handleTouchEnd = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    recordTouchEvent('end', event)
-    if (activeInputRef.current !== 'touch') return
-    if (event.cancelable) event.preventDefault()
-    isDrawingRef.current = false
-    activeInputRef.current = null
-  }
-
-  const handleTouchCancel = (event: React.TouchEvent<HTMLCanvasElement>) => {
-    recordTouchEvent('cancel', event)
-    if (activeInputRef.current !== 'touch') return
-    isDrawingRef.current = false
-    activeInputRef.current = null
-  }
+  }, [
+    handleTouchStart,
+    handleTouchMove,
+    handleTouchEnd,
+    handleTouchCancel,
+    imageDetails,
+  ])
 
   const handleReset = () => {
     const sourceCanvas = sourceCanvasRef.current
@@ -611,10 +783,6 @@ function App() {
                   onPointerUp={handlePointerUp}
                   onPointerLeave={handlePointerLeave}
                   onPointerCancel={handlePointerCancel}
-                  onTouchStart={handleTouchStart}
-                  onTouchMove={handleTouchMove}
-                  onTouchEnd={handleTouchEnd}
-                  onTouchCancel={handleTouchCancel}
                 />
                 <div className="text-pretty text-sm text-slate-500">
                   Drag or swipe to apply a gentle blur.
