@@ -44,14 +44,22 @@ function App() {
   const touchEventCountRef = useRef(0)
   const touchDebugUpdateRef = useRef(0)
 
+  const isMobile =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(pointer: coarse)')?.matches ||
+      (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0))
+
   const [imageDetails, setImageDetails] = useState<ImageDetails | null>(null)
-  const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
-  const [blurStrength, setBlurStrength] = useState(DEFAULT_BLUR_STRENGTH)
+  const [brushSize, setBrushSize] = useState(isMobile ? 140 : DEFAULT_BRUSH_SIZE)
+  const [blurStrength, setBlurStrength] = useState(
+    isMobile ? 18 : DEFAULT_BLUR_STRENGTH
+  )
   const blurStrengthRef = useRef(blurStrength)
   const [statusMessage, setStatusMessage] = useState<string>('')
   const [clipboardDebug, setClipboardDebug] =
     useState<ClipboardDebug | null>(null)
   const [touchDebug, setTouchDebug] = useState<TouchDebug | null>(null)
+  const [showTouchDebugOverlay, setShowTouchDebugOverlay] = useState(false)
 
   const setupCanvases = useCallback((image: HTMLImageElement) => {
     const canvas = canvasRef.current
@@ -756,10 +764,6 @@ function App() {
   }
 
   const hasImage = Boolean(imageDetails)
-  const isMobile =
-    typeof window !== 'undefined' &&
-    (window.matchMedia?.('(pointer: coarse)')?.matches ||
-      (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0))
   const buttonBaseClass =
     'inline-flex w-full items-center justify-center gap-2 rounded-full border border-transparent px-6 py-2.5 text-base font-semibold active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none sm:w-auto'
   const primaryButtonClass = cn(
@@ -938,6 +942,21 @@ function App() {
             <p className="m-0 text-pretty text-sm font-semibold text-slate-900">
               Clipboard debug
             </p>
+            {isMobile && (
+              <label className="flex items-center justify-between gap-3 text-sm">
+                <span className="w-20 font-semibold text-slate-500">
+                  Touch overlay
+                </span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-blue-600"
+                  checked={showTouchDebugOverlay}
+                  onChange={(event) =>
+                    setShowTouchDebugOverlay(event.target.checked)
+                  }
+                />
+              </label>
+            )}
             <div className="flex items-start gap-3 text-sm">
               <span className="w-20 font-semibold text-slate-500">Types</span>
               <span className="break-words font-mono tabular-nums text-slate-700">
@@ -970,7 +989,7 @@ function App() {
             </div>
           </div>
         )}
-        {isMobile && touchDebug && (
+        {isMobile && touchDebug && showTouchDebugOverlay && (
           <div className="pointer-events-none fixed bottom-4 right-4 z-50 w-72 rounded-2xl bg-slate-900/90 p-3 text-xs text-slate-100 shadow-lg">
             <div className="flex items-center justify-between text-[10px] font-semibold uppercase text-slate-300">
               <span>Touch debug</span>
